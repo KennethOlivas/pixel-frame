@@ -1,0 +1,7 @@
+node_modules/
+dist/
+test-results/
+playwright-report/
+public/ffmpeg/
+*.tsbuildinfo
+.DS_Store

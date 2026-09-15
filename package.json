@@ -1,0 +1,42 @@
+{
+  "name": "pixel-frame",
+  "private": false,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "tsc -b && vite build && node scripts/build-offline.mjs",
+    "preview": "vite preview --host 0.0.0.0",
+    "test": "tsx --test tests/*.test.ts",
+    "postinstall": "node scripts/copy-ffmpeg.mjs",
+    "predev": "node scripts/copy-ffmpeg.mjs",
+    "prebuild": "node scripts/copy-ffmpeg.mjs",
+    "test:fixtures": "node tests/generate-fixtures.mjs",
+    "test:engine": "node tests/engine-browser.mjs",
+    "test:ui": "node tests/ui-browser.mjs",
+    "test:panels": "node tests/panels-browser.mjs",
+    "test:zoom": "node tests/zoom-browser.mjs",
+    "test:layouts": "node tests/generate-layout-fixtures.mjs && node tests/layout-browser.mjs",
+    "test:responsive": "node tests/responsive-browser.mjs"
+  },
+  "dependencies": {
+    "@ffmpeg/core": "^0.12.10",
+    "@ffmpeg/ffmpeg": "^0.12.15",
+    "@mediabunny/prores": "^1.56.2",
+    "@phosphor-icons/react": "^2.1.10",
+    "@radix-ui/react-select": "^2.3.7",
+    "fflate": "^0.8.2",
+    "mediabunny": "^1.0.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.51.1",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^4.4.1",
+    "tsx": "^4.19.3",
+    "typescript": "^5.7.3",
+    "vite": "^6.3.5"
+  }
+}
