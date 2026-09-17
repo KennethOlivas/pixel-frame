@@ -70,6 +70,9 @@ try {
   await page.getByRole('button', { name: 'WEBP', exact: true }).click();
   const webp = await download(() => page.getByRole('button', { name: 'Descargar fotograma', exact: true }).click(), 'capture.webp');
   assert.equal((await readFile(webp.path)).subarray(8, 12).toString(), 'WEBP');
+  await page.getByRole('button', { name: 'TIFF', exact: true }).click();
+  const tiff = await download(() => page.getByRole('button', { name: 'Descargar fotograma', exact: true }).click(), 'capture.tif');
+  assert.deepEqual([...new Uint8Array(await readFile(tiff.path)).slice(0, 4)], [0x49, 0x49, 42, 0]);
   await page.getByRole('button', { name: 'PNG', exact: true }).click();
   await page.getByRole('tab', { name: 'Por rango' }).click();
   const rangeMode = page.getByRole('combobox', { name: 'Extraer', exact: true });
@@ -89,6 +92,22 @@ try {
   }
   await page.getByRole('button', { name: 'Eliminar captura 1', exact: true }).click();
   await page.waitForFunction(() => document.querySelectorAll('.capture-card').length === 3);
+  await selectOption(page, rangeMode, 'Lista de timecodes');
+  await page.locator('#timecodes').fill('00:00:00:02\n00:00:00:03');
+  await page.getByRole('button', { name: 'Extraer rango', exact: true }).click();
+  await ready();
+  assert.equal(await page.locator('.capture-card').count(), 5);
+  const csv = await download(() => page.getByRole('button', { name: 'CSV', exact: true }).click(), 'captures.csv');
+  assert.match(await readFile(csv.path, 'utf8'), /^timecode,seconds,filename,format,width,height,bytes/m);
+  const sheet = await download(() => page.getByRole('button', { name: 'Contacto', exact: true }).click(), 'contacts.png');
+  assert.equal((await readFile(sheet.path)).subarray(1, 4).toString(), 'PNG');
+  await page.getByRole('button', { name: 'Previsualizar captura 1', exact: true }).click();
+  await page.getByRole('button', { name: 'A/B', exact: true }).click();
+  await page.getByRole('button', { name: 'Previsualizar captura 2', exact: true }).click();
+  await page.getByRole('button', { name: 'A/B', exact: true }).click();
+  await expect(page.locator('.comparison-dialog')).toBeVisible();
+  await page.getByRole('slider', { name: 'Divisor de comparación' }).fill('70');
+  await page.keyboard.press('Escape');
   await page.getByRole('button', { name: 'Atajos de teclado (?)', exact: true }).click();
   await page.locator('.help-dialog').waitFor({ state: 'visible' }); await page.keyboard.press('Escape');
   await open('fallback-mpeg4.avi');
@@ -118,5 +137,5 @@ try {
   await page.screenshot({ path: join(outputDirectory, 'mobile.png'), fullPage: true });
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
   assert.deepEqual(errors, []); assert.deepEqual(externalRequests, []);
-  console.log(JSON.stringify({ result: 'PASS', checks: ['offline reload and local input', '10 rapid exact steps', 'SMPTE seek', 'native-size PNG', 'JPEG and WebP export', 'tray and ZIP integrity', 'interval extraction', 'preview and keyboard help', 'offline FFmpeg AVI', 'ProRes alpha PNG', 'native 4K PNG export', 'desktop/mobile layout', 'no external requests or runtime errors'], outputDirectory }, null, 2));
+  console.log(JSON.stringify({ result: 'PASS', checks: ['offline reload and local input', '10 rapid exact steps', 'SMPTE seek', 'native-size PNG, JPEG, WebP and TIFF export', 'tray, ZIP, CSV and contact sheet', 'interval and pasted-timecode extraction', 'A/B comparison', 'preview and keyboard help', 'offline FFmpeg AVI', 'ProRes alpha PNG', 'native 4K PNG export', 'desktop/mobile layout', 'no external requests or runtime errors'], outputDirectory }, null, 2));
 } finally { await browser.close(); }

@@ -1,17 +1,27 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { unzipSync } from 'fflate';
-import { captureFilename, captureTimecode, CaptureStore, createCaptureZip, MAX_ZIP_BYTES, sanitizeVideoName, type Capture } from '../src/lib/captures';
+import { captureFilename, captureMetadataBlob, captureTimecode, CaptureStore, createCaptureZip, MAX_ZIP_BYTES, sanitizeVideoName, type Capture } from '../src/lib/captures';
 
 test('capture names preserve a readable source name without path or archive traversal', () => {
   assert.equal(captureFilename('My film.v2.mp4', '01:02:03:04', 'png'), 'My film.v2_01-02-03-04.png');
   assert.equal(captureFilename('My film.v2.mp4', '01:02:03:04', 'jpeg', 2), 'My film.v2_01-02-03-04_02.jpg');
   assert.equal(captureFilename('Film.mov', '00:00:00:00', 'webp'), 'Film_00-00-00-00.webp');
+  assert.equal(captureFilename('Film.mov', '00:00:00:00', 'tiff'), 'Film_00-00-00-00.tif');
   assert.equal(sanitizeVideoName('../../frame.mp4').includes('/'), false);
   assert.equal(sanitizeVideoName('C:\\videos\\frame.mov').includes('\\'), false);
   assert.equal(sanitizeVideoName('.mp4'), 'video');
   assert.equal(sanitizeVideoName('x'.repeat(400) + '.mp4').length, 120);
   assert.throws(() => captureFilename('video.mp4', '../frame', 'png'));
+});
+
+test('capture metadata exports portable JSON and CSV without blob URLs', async () => {
+  const captures = [capture('private-id', 'film_00-00-00-00.png', 1234)];
+  const json = await captureMetadataBlob(captures, 'json').text();
+  const csv = await captureMetadataBlob(captures, 'csv').text();
+  assert.match(json, /film_00-00-00-00\.png/);
+  assert.doesNotMatch(json, /thumbnailUrl|private-id/);
+  assert.match(csv, /^timecode,seconds,filename,format,width,height,bytes/m);
 });
 
 test('unknown frame rates use explicit millisecond timestamps with correct second rollover', () => {

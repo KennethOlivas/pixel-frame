@@ -1,0 +1,47 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    name: Build and publish release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout tag
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Verify semantic tag
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          test "$RELEASE_TAG" = "v$(node -p \"require('./package.json').version\")"
+
+      - name: Install and build
+        run: |
+          npm ci
+          npm run build
+
+      - name: Package distribution
+        run: tar -czf "pixel-frame-${{ github.ref_name }}-dist.tar.gz" dist
+
+      - name: Create or update GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "pixel-frame-${RELEASE_TAG}-dist.tar.gz" --clobber
+          else
+            gh release create "$RELEASE_TAG" "pixel-frame-${RELEASE_TAG}-dist.tar.gz" --generate-notes --title "PixelFrame ${RELEASE_TAG}"
+          fi

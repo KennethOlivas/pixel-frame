@@ -1,7 +1,7 @@
 import { AsyncZipDeflate, Zip } from 'fflate';
 import { formatTimecode, type FrameRateInput } from './timecode';
 
-export type CaptureFormat = 'png' | 'webp' | 'jpeg';
+export type CaptureFormat = 'png' | 'webp' | 'jpeg' | 'tiff';
 
 export interface Capture {
   id: string;
@@ -41,7 +41,7 @@ export interface CaptureStoreOptions {
 const MiB = 1024 * 1024;
 export const MAX_ZIP_BYTES = 256 * MiB;
 export const MAX_IMAGE_PIXELS = 40_000_000;
-const MIME: Record<CaptureFormat, string> = { png: 'image/png', webp: 'image/webp', jpeg: 'image/jpeg' };
+const MIME: Record<CaptureFormat, string> = { png: 'image/png', webp: 'image/webp', jpeg: 'image/jpeg', tiff: 'image/tiff' };
 
 export function imageMimeType(format: CaptureFormat): string {
   return MIME[format];
@@ -57,7 +57,8 @@ export function captureFilename(videoName: string, timecode: string, format: Cap
   if (!Number.isSafeInteger(occurrence) || occurrence < 1) throw new RangeError('Número de captura no válido.');
   if (!/^\d{2,}:\d{2}:\d{2}(?::\d{2,}|\.\d{3})$/.test(timecode)) throw new RangeError('Código de tiempo no válido.');
   const suffix = occurrence > 1 ? `_${String(occurrence).padStart(2, '0')}` : '';
-  return `${sanitizeVideoName(videoName)}_${timecode.replaceAll(':', '-').replace('.', '-')}${suffix}.${format === 'jpeg' ? 'jpg' : format}`;
+  const extension = format === 'jpeg' ? 'jpg' : format === 'tiff' ? 'tif' : format;
+  return `${sanitizeVideoName(videoName)}_${timecode.replaceAll(':', '-').replace('.', '-')}${suffix}.${extension}`;
 }
 
 /** Unknown-rate media uses milliseconds instead of inventing a frame rate. */
@@ -99,7 +100,56 @@ function nativeCanvas({ source, width, height, format = 'png' }: CaptureImageOpt
   return canvas;
 }
 
+/** Baseline, uncompressed RGBA TIFF. This avoids a network dependency for archival export. */
+function encodeTiff(canvas: ExportCanvas): Blob {
+  const context = canvas.getContext('2d', { alpha: true });
+  if (!context) throw new Error('No se pudo leer los píxeles para exportar TIFF.');
+  const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+  const entries = 13;
+  const ifdOffset = 8;
+  const ifdBytes = 2 + entries * 12 + 4;
+  const bitsOffset = ifdOffset + ifdBytes;
+  const xResolutionOffset = bitsOffset + 8;
+  const yResolutionOffset = xResolutionOffset + 8;
+  const pixelsOffset = yResolutionOffset + 8;
+  const bytes = new Uint8Array(pixelsOffset + pixels.byteLength);
+  const view = new DataView(bytes.buffer);
+  view.setUint8(0, 0x49); view.setUint8(1, 0x49); // little-endian: II
+  view.setUint16(2, 42, true);
+  view.setUint32(4, ifdOffset, true);
+  view.setUint16(ifdOffset, entries, true);
+  let entryOffset = ifdOffset + 2;
+  const entry = (tag: number, type: number, count: number, value: number) => {
+    view.setUint16(entryOffset, tag, true);
+    view.setUint16(entryOffset + 2, type, true);
+    view.setUint32(entryOffset + 4, count, true);
+    if (type === 3 && count === 1) view.setUint16(entryOffset + 8, value, true);
+    else view.setUint32(entryOffset + 8, value, true);
+    entryOffset += 12;
+  };
+  entry(256, 4, 1, canvas.width); // ImageWidth
+  entry(257, 4, 1, canvas.height); // ImageLength
+  entry(258, 3, 4, bitsOffset); // BitsPerSample
+  entry(259, 3, 1, 1); // no compression
+  entry(262, 3, 1, 2); // RGB
+  entry(273, 4, 1, pixelsOffset); // StripOffsets
+  entry(277, 3, 1, 4); // SamplesPerPixel
+  entry(278, 4, 1, canvas.height); // RowsPerStrip
+  entry(279, 4, 1, pixels.byteLength); // StripByteCounts
+  entry(282, 5, 1, xResolutionOffset);
+  entry(283, 5, 1, yResolutionOffset);
+  entry(296, 3, 1, 2); // inches
+  entry(338, 3, 1, 2); // unassociated alpha
+  view.setUint32(entryOffset, 0, true);
+  for (let index = 0; index < 4; index++) view.setUint16(bitsOffset + index * 2, 8, true);
+  view.setUint32(xResolutionOffset, 72, true); view.setUint32(xResolutionOffset + 4, 1, true);
+  view.setUint32(yResolutionOffset, 72, true); view.setUint32(yResolutionOffset + 4, 1, true);
+  bytes.set(pixels, pixelsOffset);
+  return new Blob([bytes], { type: MIME.tiff });
+}
+
 function encodeCanvas(canvas: ExportCanvas, format: CaptureFormat, quality = 0.95): Promise<Blob> {
+  if (format === 'tiff') return Promise.resolve(encodeTiff(canvas));
   const normalizedQuality = Number.isFinite(quality) ? Math.min(1, Math.max(0.01, quality)) : 0.95;
   const validate = (blob: Blob | null): Blob => {
     if (!blob) throw new Error('El navegador no pudo codificar este fotograma. Prueba otro formato.');
@@ -357,6 +407,55 @@ export function downloadBlob(blob: Blob, filename: string): void {
 
 export async function downloadCapture(store: CaptureStore, capture: Capture): Promise<void> {
   downloadBlob(await store.getBlob(capture.id), capture.filename);
+}
+
+export type CaptureMetadataFormat = 'json' | 'csv';
+
+function csvCell(value: string | number): string {
+  const text = String(value);
+  return /[",\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
+}
+
+/** A portable shot list, intentionally excluding local blob URLs and any video pixels. */
+export function captureMetadataBlob(captures: readonly Capture[], format: CaptureMetadataFormat): Blob {
+  const rows = captures.map(({ id: _id, thumbnailUrl: _thumbnailUrl, ...capture }) => capture);
+  if (format === 'json') return new Blob([JSON.stringify({ generatedAt: new Date().toISOString(), captures: rows }, null, 2)], { type: 'application/json' });
+  const headings = ['timecode', 'seconds', 'filename', 'format', 'width', 'height', 'bytes'];
+  const body = rows.map(capture => [capture.timecode, capture.time.toFixed(3), capture.filename, capture.format, capture.width, capture.height, capture.size].map(csvCell).join(','));
+  return new Blob([[headings.join(','), ...body].join('\n') + '\n'], { type: 'text/csv;charset=utf-8' });
+}
+
+export async function createContactSheet(store: Pick<CaptureStore, 'getBlob'>, captures: readonly Capture[], columns = 4): Promise<Blob> {
+  if (!captures.length) throw new Error('Añade al menos una captura para crear una hoja de contactos.');
+  const count = Math.min(captures.length, 500);
+  const safeColumns = Math.max(1, Math.min(6, Math.floor(columns)));
+  const tileWidth = 320;
+  const tileHeight = 180;
+  const labelHeight = 34;
+  const padding = 16;
+  const rows = Math.ceil(count / safeColumns);
+  const canvas = createCanvas(safeColumns * tileWidth + (safeColumns + 1) * padding, rows * (tileHeight + labelHeight) + (rows + 1) * padding);
+  const context = canvas.getContext('2d', { alpha: false });
+  if (!context) throw new Error('No se pudo crear la hoja de contactos.');
+  context.fillStyle = '#0e1117'; context.fillRect(0, 0, canvas.width, canvas.height);
+  context.font = '14px ui-monospace, SFMono-Regular, Menlo, monospace';
+  for (let index = 0; index < count; index++) {
+    const item = captures[index];
+    const column = index % safeColumns;
+    const row = Math.floor(index / safeColumns);
+    const x = padding + column * (tileWidth + padding);
+    const y = padding + row * (tileHeight + labelHeight + padding);
+    const bitmap = await createImageBitmap(await store.getBlob(item.id));
+    const scale = Math.min(tileWidth / bitmap.width, tileHeight / bitmap.height);
+    const width = Math.round(bitmap.width * scale);
+    const height = Math.round(bitmap.height * scale);
+    context.fillStyle = '#191e27'; context.fillRect(x, y, tileWidth, tileHeight);
+    context.drawImage(bitmap, x + Math.round((tileWidth - width) / 2), y + Math.round((tileHeight - height) / 2), width, height);
+    bitmap.close();
+    context.fillStyle = '#d6dde8'; context.fillText(`${String(index + 1).padStart(2, '0')}  ${item.timecode}`, x, y + tileHeight + 22);
+  }
+  try { return await encodeCanvas(canvas, 'png'); }
+  finally { releaseCanvas(canvas); }
 }
 
 export async function copyFramePng(source: CanvasImageSource, width: number, height: number): Promise<void> {

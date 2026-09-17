@@ -1,0 +1,19 @@
+name: Propuesta de función
+description: Sugiere una mejora para PixelFrame.
+title: "feature: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Caso de uso
+      description: Qué problema de edición o revisión resolvería.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Propuesta
+      description: Describe el flujo que esperas.
+    validations:
+      required: true

@@ -43,7 +43,7 @@ import type { WorkspaceLayoutMode } from './hooks/useWorkspaceLayout';
 import { useWorkspacePanels } from './hooks/useWorkspacePanels';
 import { openMedia } from './lib/media';
 import type { DecodedFrame, MediaSession } from './lib/media';
-import { CaptureStore, captureFilename, captureTimecode, captureImageBlob, copyFramePng, downloadBlob, downloadCapture, downloadZip, sanitizeVideoName } from './lib/captures';
+import { CaptureStore, captureFilename, captureMetadataBlob, captureTimecode, captureImageBlob, copyFramePng, createContactSheet, downloadBlob, downloadCapture, downloadZip, sanitizeVideoName } from './lib/captures';
 import type { Capture, CaptureFormat } from './lib/captures';
 import { formatTimecode, parseTimecode } from './lib/timecode';
 
@@ -60,6 +60,25 @@ function waitForFrame(delay: number, signal: AbortSignal): Promise<void> {
   });
 }
 const isAbort = (error: unknown) => error instanceof DOMException && error.name === 'AbortError';
+function sceneSignature(source: CanvasImageSource): Float32Array {
+  const canvas = document.createElement('canvas');
+  canvas.width = 32; canvas.height = 18;
+  const context = canvas.getContext('2d', { willReadFrequently: true });
+  if (!context) throw new Error('No se pudo analizar los cambios de escena.');
+  context.drawImage(source, 0, 0, canvas.width, canvas.height);
+  const data = context.getImageData(0, 0, canvas.width, canvas.height).data;
+  const signature = new Float32Array(canvas.width * canvas.height);
+  for (let index = 0; index < signature.length; index++) {
+    const offset = index * 4;
+    signature[index] = (data[offset] * 0.2126 + data[offset + 1] * 0.7152 + data[offset + 2] * 0.0722) / 255;
+  }
+  return signature;
+}
+function sceneDifference(previous: Float32Array, next: Float32Array): number {
+  let difference = 0;
+  for (let index = 0; index < previous.length; index++) difference += Math.abs(previous[index] - next[index]);
+  return difference / previous.length;
+}
 function IconButton({ label, children, active = false, ...props }: { label: string; children: ReactNode; active?: boolean } & React.ButtonHTMLAttributes<HTMLButtonElement>) {
   return <button type="button" className={`icon-button${active ? ' active' : ''}`} aria-label={label} title={label} {...props}>{children}</button>;
 }
@@ -96,7 +115,10 @@ function App() {
   const [rangeIn, setRangeIn] = useState<number | null>(null);
   const [rangeOut, setRangeOut] = useState<number | null>(null);
   const [interval, setIntervalValue] = useState(1);
-  const [rangeMode, setRangeMode] = useState<'interval' | 'all'>('interval');
+  const [rangeMode, setRangeMode] = useState<'interval' | 'all' | 'timecodes' | 'scenes'>('interval');
+  const [timecodesText, setTimecodesText] = useState('');
+  const [sceneSample, setSceneSample] = useState(1);
+  const [sceneThreshold, setSceneThreshold] = useState(0.24);
   const [busy, setBusy] = useState<string | null>(null);
   const busyRef = useRef(false);
   const [progress, setProgress] = useState(0);
@@ -109,6 +131,9 @@ function App() {
   const [help, setHelp] = useState(false);
   const [preview, setPreview] = useState<{ capture: Capture; url: string } | null>(null);
   const [previewOpen, setPreviewOpen] = useState(false);
+  const [comparisonFirst, setComparisonFirst] = useState<{ capture: Capture; url: string } | null>(null);
+  const [comparison, setComparison] = useState<{ left: { capture: Capture; url: string }; right: { capture: Capture; url: string } } | null>(null);
+  const [comparisonSplit, setComparisonSplit] = useState(50);
   const [dragging, setDragging] = useState(false);
   const dragDepth = useRef(0);
   const [offlineReady, setOfflineReady] = useState(false);
@@ -126,7 +151,12 @@ function App() {
   const totalBytes = captures.reduce((sum, capture) => sum + capture.size, 0);
   const rangeStart = rangeIn ?? start;
   const rangeEnd = rangeOut ?? duration;
-  const rangeCount = rangeMode === 'interval' && interval > 0 ? Math.ceil(Math.max(0, rangeEnd - rangeStart) / interval) : Math.ceil(Math.max(0, Math.min(rangeEnd, rangeStart + 1) - rangeStart) * (fps ?? 30));
+  const parsedTimecodes = timecodesText.split(/[\n,;]+/).map(value => value.trim()).filter(Boolean).map(value => fps ? parseTimecode(value, fps) : Number(value.replace(/\s*s$/, ''))).filter((value): value is number => value !== null && Number.isFinite(value) && value >= start && value < duration);
+  const uniqueTimecodes = [...new Set(parsedTimecodes.map(value => Number(value.toFixed(6))))].sort((a, b) => a - b);
+  const rangeCount = rangeMode === 'interval' && interval > 0 ? Math.ceil(Math.max(0, rangeEnd - rangeStart) / interval)
+    : rangeMode === 'all' ? Math.ceil(Math.max(0, Math.min(rangeEnd, rangeStart + 1) - rangeStart) * (fps ?? 30))
+      : rangeMode === 'timecodes' ? uniqueTimecodes.length
+        : sceneSample > 0 ? Math.min(500, Math.ceil(Math.max(0, rangeEnd - rangeStart) / sceneSample)) : 0;
 
   function notify(text: string, error = false) { setNotice({ text, error }); }
   function report(error: unknown) { if (!isAbort(error)) notify(error instanceof Error ? error.message : 'No se pudo completar la operación.', true); }
@@ -306,6 +336,22 @@ function App() {
     catch (error) { report(error); }
     finally { busyRef.current = false; setBusy(null); }
   }
+  async function exportMetadata(format: 'json' | 'csv') {
+    if (!captures.length || busyRef.current) return;
+    const base = sanitizeVideoName(exportName || meta?.name || 'pixelframe');
+    downloadBlob(captureMetadataBlob(captures, format), `${base}_capturas.${format}`);
+    notify(`Metadatos de ${captures.length} capturas exportados como ${format.toUpperCase()}.`);
+  }
+  async function exportContactSheet() {
+    if (!captures.length || busyRef.current) return;
+    busyRef.current = true; setBusy('Creando hoja de contactos');
+    try {
+      const blob = await createContactSheet(store.current, captures);
+      downloadBlob(blob, `${sanitizeVideoName(exportName || meta?.name || 'pixelframe')}_contactos.png`);
+      notify('Hoja de contactos PNG exportada.');
+    } catch (error) { report(error); }
+    finally { busyRef.current = false; setBusy(null); }
+  }
   async function removeCapture(item: Capture) {
     if (busyRef.current) return;
     try { await store.current.remove(item.id); setCaptures(items => items.filter(c => c.id !== item.id)); }
@@ -320,6 +366,15 @@ function App() {
     try { const blob = await store.current.getBlob(item.id); setPreview({ capture: item, url: URL.createObjectURL(blob) }); setPreviewOpen(true); }
     catch (error) { report(error); }
   }
+  async function compareCapture(item: Capture) {
+    try {
+      const selected = { capture: item, url: URL.createObjectURL(await store.current.getBlob(item.id)) };
+      setPreviewOpen(false);
+      if (!comparisonFirst) { setComparisonFirst(selected); notify('Primera captura elegida. Selecciona otra para compararlas.'); return; }
+      setComparison({ left: comparisonFirst, right: selected });
+      setComparisonFirst(null); setComparisonSplit(50);
+    } catch (error) { report(error); }
+  }
   function mark(point: 'in' | 'out') {
     if (!session || busyRef.current) return;
     if (point === 'in') { setRangeIn(time); if (rangeOut !== null && time >= rangeOut) setRangeOut(null); }
@@ -329,7 +384,10 @@ function App() {
   async function extractRange() {
     const active = sessionRef.current;
     if (!active || busyRef.current) return;
-    if (!(rangeEnd > rangeStart) || !Number.isFinite(interval) || interval <= 0) { notify('Elige un rango válido y un intervalo mayor que cero.', true); return; }
+    if (!(rangeEnd > rangeStart)) { notify('Elige un rango válido.', true); return; }
+    if (rangeMode === 'interval' && (!Number.isFinite(interval) || interval <= 0)) { notify('Elige un intervalo mayor que cero.', true); return; }
+    if (rangeMode === 'timecodes' && (!uniqueTimecodes.length || uniqueTimecodes.length !== timecodesText.split(/[\n,;]+/).map(value => value.trim()).filter(Boolean).length)) { notify('Revisa los timecodes: usa uno por línea o separado por comas, dentro de la duración.', true); return; }
+    if (rangeMode === 'scenes' && (!Number.isFinite(sceneSample) || sceneSample <= 0 || !Number.isFinite(sceneThreshold) || sceneThreshold <= 0 || sceneThreshold > 1)) { notify('Elige valores válidos para el análisis de escenas.', true); return; }
     if (rangeCount + captures.length > 500) { notify('La bandeja admite 500 capturas. Aumenta el intervalo o reduce el rango.', true); return; }
     stop(); seekController.current?.abort(); thumbnailsController.current?.abort();
     const controller = new AbortController(); batchController.current = controller;
@@ -344,11 +402,28 @@ function App() {
       setTrayOpen(true);
       if (rangeMode === 'all') {
         for await (const frame of active.frames(rangeStart, Math.min(rangeEnd, rangeStart + 1), controller.signal)) await add(frame);
-      } else {
+      } else if (rangeMode === 'interval') {
         let previousTime = -Infinity;
         for (let index = 0; index < rangeCount; index++) {
           const frame = await active.getFrame(rangeStart + index * interval, controller.signal);
           if (frame.time !== previousTime) { await add(frame); previousTime = frame.time; }
+        }
+      } else if (rangeMode === 'timecodes') {
+        let previousTime = -Infinity;
+        for (const target of uniqueTimecodes) {
+          const frame = await active.getFrame(target, controller.signal);
+          if (frame.time !== previousTime) { await add(frame); previousTime = frame.time; }
+        }
+      } else {
+        let previous: Float32Array | null = null;
+        let previousTime = -Infinity;
+        for (let index = 0; index < rangeCount; index++) {
+          const frame = await active.getFrame(rangeStart + index * sceneSample, controller.signal);
+          const signature = sceneSignature(frame.canvas);
+          if (frame.time !== previousTime && (!previous || sceneDifference(previous, signature) >= sceneThreshold)) await add(frame);
+          previous = signature;
+          previousTime = frame.time;
+          setProgress((index + 1) / Math.max(1, rangeCount));
         }
       }
       notify(`${count} fotogramas añadidos a la bandeja.`);
@@ -368,15 +443,16 @@ function App() {
   }, []);
   useEffect(() => { if (!notice) return; const timer = window.setTimeout(() => setNotice(null), notice.error ? 9000 : 4000); return () => window.clearTimeout(timer); }, [notice]);
   useEffect(() => { return () => { if (preview) URL.revokeObjectURL(preview.url); }; }, [preview]);
+  useEffect(() => () => { if (comparison) { URL.revokeObjectURL(comparison.left.url); URL.revokeObjectURL(comparison.right.url); } }, [comparison]);
   useEffect(() => {
     function keydown(event: KeyboardEvent) {
       const target = event.target as HTMLElement;
       if (event.defaultPrevented || target.closest('[role=combobox], [role=listbox], [role=option], dialog')) return;
-      if (event.key === 'Escape') { setHelp(false); setPreviewOpen(false); batchController.current?.abort(); return; }
+      if (event.key === 'Escape') { setHelp(false); setPreviewOpen(false); setComparison(null); setComparisonFirst(null); batchController.current?.abort(); return; }
       if (target.closest('input, textarea, select, [contenteditable="true"], dialog')) return;
       if (target.closest('button,a') && ['Enter', ' '].includes(event.key)) return;
       if (event.key === '?') { event.preventDefault(); setHelp(value => !value); return; }
-      if (help || preview || disabled || target.closest('[role=separator]')) return;
+      if (help || preview || comparison || disabled || target.closest('[role=separator]')) return;
       const key = event.key.toLowerCase();
       if ((event.ctrlKey || event.metaKey) && key === 'c') { event.preventDefault(); void copyCurrent(); return; }
       if (event.ctrlKey || event.metaKey || event.altKey) return;
@@ -456,19 +532,19 @@ function App() {
         <div className="inspector-header"><SlidersHorizontalIcon size={16}/><h2>Extracción</h2><IconButton label="Cerrar panel de extracción" onClick={() => panels.toggle('inspector')}><SidebarSimpleIcon size={16} mirrored/></IconButton></div>
         <div className="inspector-tabs" role="tablist" aria-label="Modo de extracción"><button role="tab" aria-selected={panel === 'frame'} className={panel === 'frame' ? 'selected' : ''} onClick={() => setPanel('frame')}><ImageIcon size={14}/>Fotograma</button><button role="tab" aria-selected={panel === 'range'} className={panel === 'range' ? 'selected' : ''} onClick={() => setPanel('range')}><StackSimpleIcon size={14}/>Por rango</button></div>
         <div className="inspector-content">
-          <div className="setting-section"><div className="section-label">FORMATO DE IMAGEN</div><div className="format-selector">{(['png', 'jpeg', 'webp'] as const).map(item => <button key={item} disabled={!!busy} aria-pressed={format === item} className={format === item ? 'selected' : ''} onClick={() => setFormat(item)}>{item === 'jpeg' ? 'JPG' : item.toUpperCase()}</button>)}</div><div className="format-note">{format === 'png' ? <><CheckIcon size={13}/>Sin pérdida · conserva la transparencia decodificada</> : <><SlidersHorizontalIcon size={13}/>Menor peso, calidad ajustable</>}</div>{format !== 'png' && <div className="quality-control"><label htmlFor="quality">Calidad <span className="mono">{quality}%</span></label><input id="quality" type="range" min="1" max="100" value={quality} disabled={!!busy} onChange={event => setQuality(Number(event.target.value))}/><div><span>Menor peso</span><span>Máxima calidad</span></div></div>}</div>
+          <div className="setting-section"><div className="section-label">FORMATO DE IMAGEN</div><div className="format-selector">{(['png', 'jpeg', 'webp', 'tiff'] as const).map(item => <button key={item} disabled={!!busy} aria-pressed={format === item} className={format === item ? 'selected' : ''} onClick={() => setFormat(item)}>{item === 'jpeg' ? 'JPG' : item === 'tiff' ? 'TIFF' : item.toUpperCase()}</button>)}</div><div className="format-note">{format === 'png' || format === 'tiff' ? <><CheckIcon size={13}/>{format === 'tiff' ? 'TIFF RGBA sin compresión · ideal para archivo' : 'Sin pérdida · conserva la transparencia decodificada'}</> : <><SlidersHorizontalIcon size={13}/>Menor peso, calidad ajustable</>}</div>{format !== 'png' && format !== 'tiff' && <div className="quality-control"><label htmlFor="quality">Calidad <span className="mono">{quality}%</span></label><input id="quality" type="range" min="1" max="100" value={quality} disabled={!!busy} onChange={event => setQuality(Number(event.target.value))}/><div><span>Menor peso</span><span>Máxima calidad</span></div></div>}</div>
           <div className="setting-section"><div className="section-label">RESOLUCIÓN DE SALIDA <LockSimpleIcon size={12}/></div><div className="resolution-box"><span className="mono">{meta ? `${meta.width} × ${meta.height}` : '— × —'}</span><span className="native-tag">NATIVA</span></div><p className="setting-hint">Cada píxel, en su tamaño original.</p></div>
-          {panel === 'range' && <div className="setting-section range-settings"><div className="section-label">RANGO DE EXTRACCIÓN<button disabled={disabled} onClick={() => { setRangeIn(null); setRangeOut(null); }}>Restablecer</button></div><div className="in-out"><button disabled={disabled} onClick={() => mark('in')}><span>ENTRADA <kbd>I</kbd></span><strong className="mono">{timeLabel(rangeStart, fps ?? (session ? null : 30))}</strong></button><button disabled={disabled} onClick={() => mark('out')}><span>SALIDA <kbd>O</kbd></span><strong className="mono">{timeLabel(rangeEnd, fps ?? (session ? null : 30))}</strong></button></div><label className="field-label" htmlFor="range-mode">Extraer</label><Dropdown id="range-mode" label="Extraer" value={rangeMode} disabled={!!busy} onValueChange={value => setRangeMode(value as 'interval' | 'all')} options={[
+        {panel === 'range' && <div className="setting-section range-settings"><div className="section-label">RANGO DE EXTRACCIÓN<button disabled={disabled} onClick={() => { setRangeIn(null); setRangeOut(null); }}>Restablecer</button></div><div className="in-out"><button disabled={disabled} onClick={() => mark('in')}><span>ENTRADA <kbd>I</kbd></span><strong className="mono">{timeLabel(rangeStart, fps ?? (session ? null : 30))}</strong></button><button disabled={disabled} onClick={() => mark('out')}><span>SALIDA <kbd>O</kbd></span><strong className="mono">{timeLabel(rangeEnd, fps ?? (session ? null : 30))}</strong></button></div><label className="field-label" htmlFor="range-mode">Extraer</label><Dropdown id="range-mode" label="Extraer" value={rangeMode} disabled={!!busy} onValueChange={value => setRangeMode(value as 'interval' | 'all' | 'timecodes' | 'scenes')} options={[
             { value: 'interval', label: 'Un fotograma cada intervalo' }, { value: 'all', label: 'Todos los cuadros del primer segundo' },
-          ]}/>{rangeMode === 'interval' && <div className="interval-input"><label htmlFor="interval">Intervalo</label><div><input id="interval" type="number" min="0.01" step="0.1" value={interval} disabled={!!busy} onChange={event => setIntervalValue(Number(event.target.value))}/><span>seg</span></div></div>}<p className="setting-hint">{session ? `≈ ${rangeCount} capturas · hasta 500 en la bandeja` : 'Marca entrada y salida en la línea de tiempo.'}</p></div>}
-          <div className="setting-section filename-section"><label htmlFor="filename" className="section-label">NOMBRE DEL ARCHIVO</label><input id="filename" value={exportName} disabled={!session || !!busy} placeholder="Nombre del video" onChange={event => setExportName(event.target.value)}/><div className="filename-preview mono">{sanitizeVideoName(exportName || 'video')}_<span>{(fps ? timeLabel(time, fps) : '00:00:00:00').replaceAll(':', '-')}</span>.{format === 'jpeg' ? 'jpg' : format}</div></div>
+            { value: 'timecodes', label: 'Lista de timecodes' }, { value: 'scenes', label: 'Detectar cambios de escena' },
+          ]}/>{rangeMode === 'interval' && <div className="interval-input"><label htmlFor="interval">Intervalo</label><div><input id="interval" type="number" min="0.01" step="0.1" value={interval} disabled={!!busy} onChange={event => setIntervalValue(Number(event.target.value))}/><span>seg</span></div></div>}{rangeMode === 'timecodes' && <div className="timecodes-input"><label htmlFor="timecodes">Timecodes</label><textarea id="timecodes" value={timecodesText} disabled={!!busy} placeholder={fps ? '00:00:04:12\n00:00:11:08' : '4.500\n11.267'} onChange={event => setTimecodesText(event.target.value)}/><small>Uno por línea, o separados por coma.</small></div>}{rangeMode === 'scenes' && <div className="scene-inputs"><label>Muestrear cada <input aria-label="Muestrear escenas cada segundos" type="number" min="0.1" step="0.1" value={sceneSample} disabled={!!busy} onChange={event => setSceneSample(Number(event.target.value))}/> seg</label><label>Sensibilidad <input aria-label="Sensibilidad de escenas" type="number" min="0.01" max="1" step="0.01" value={sceneThreshold} disabled={!!busy} onChange={event => setSceneThreshold(Number(event.target.value))}/></label><small>Compara miniaturas de luminancia; una sensibilidad menor detecta más cortes.</small></div>}<p className="setting-hint">{session ? `${rangeMode === 'scenes' ? `hasta ${rangeCount}` : `≈ ${rangeCount}`} capturas · hasta 500 en la bandeja` : 'Marca entrada y salida en la línea de tiempo.'}</p></div>}
+          <div className="setting-section filename-section"><label htmlFor="filename" className="section-label">NOMBRE DEL ARCHIVO</label><input id="filename" value={exportName} disabled={!session || !!busy} placeholder="Nombre del video" onChange={event => setExportName(event.target.value)}/><div className="filename-preview mono">{sanitizeVideoName(exportName || 'video')}_<span>{(fps ? timeLabel(time, fps) : '00:00:00:00').replaceAll(':', '-')}</span>.{format === 'jpeg' ? 'jpg' : format === 'tiff' ? 'tif' : format}</div></div>
           {panel === 'frame' ? <div className="quick-actions"><button className="button secondary wide" disabled={!canCapture} onClick={() => void downloadCurrent()}><DownloadSimpleIcon size={16}/>Descargar fotograma</button><button className="button subtle wide" disabled={!canCapture} onClick={() => void copyCurrent()}><ClipboardIcon size={15}/>Copiar al portapapeles<span className="shortcut-symbol">⌘ C</span></button></div> : <div className="quick-actions"><button className="button primary wide" disabled={disabled || rangeCount < 1 || !Number.isFinite(rangeCount)} onClick={() => void extractRange()}><StackSimpleIcon size={16}/>Extraer rango</button><p className="setting-hint centered">Las capturas se añadirán a la bandeja.</p></div>}
           <div className="source-info"><div className="section-label">ARCHIVO DE ORIGEN</div><dl><div><dt>Contenedor</dt><dd>{meta?.container ?? '—'}</dd></div><div><dt>Códec</dt><dd>{meta?.codec ?? '—'}</dd></div><div><dt>Frecuencia</dt><dd>{fps ? `${Number(fps.toFixed(3))} fps${meta?.variableFrameRate ? ' · VFR' : ''}` : '—'}</dd></div><div><dt>Duración</dt><dd className="mono">{meta ? durationLabel(span) : '—'}</dd></div><div><dt>Tamaño</dt><dd>{meta ? bytes(meta.size) : '—'}</dd></div></dl>{meta && <p className="setting-hint">{meta.fpsConfidence === 'sampled' ? 'FPS calculados a partir de marcas de tiempo.' : 'Metadatos del contenedor.'} {meta.variableFrameRate ? 'Timecode nominal; los pasos siguen los cuadros reales.' : ''}</p>}</div>
         </div>
         <div className="inspector-footer"><ShieldCheckIcon size={17}/><div><strong>Tu archivo se queda contigo.</strong><span>Sin subidas. Sin servidores de video.</span></div></div>
       </aside>
-      <section id="capture-tray" className={`staging-tray ${trayOpen ? '' : 'collapsed'}`} aria-label="Bandeja de capturas" aria-hidden={!trayVisible} inert={!trayVisible}><div className="tray-header"><button className="tray-title" aria-expanded={trayOpen} onClick={() => setTrayOpen(value => !value)}><StackSimpleIcon size={17}/><h2>Capturas</h2><span className="count-badge">{captures.length}</span>{trayOpen ? <CaretDownIcon size={14}/> : <CaretUpIcon size={14}/>}</button><span className="tray-size">{captures.length ? `${bytes(totalBytes)} · resolución original` : 'Tu selección de fotogramas'}</span><div className="tray-actions"><button className="text-button" aria-label="Vaciar" title="Vaciar capturas" disabled={!captures.length || !!busy} onClick={() => void clearCaptures()}><TrashSimpleIcon size={14}/><span>Vaciar</span></button><button className="button zip-button" aria-label="Descargar ZIP" disabled={!captures.length || !!busy} onClick={() => void exportZip()}><DownloadSimpleIcon size={15}/><span>Descargar ZIP</span>{captures.length > 0 && <span className="zip-count">{captures.length}</span>}</button></div></div>
-        <div className={`tray-body ${captures.length ? 'populated' : ''}`} aria-hidden={!trayOpen} inert={!trayOpen}>{captures.length ? captures.map((item, index) => <article className="capture-card" key={item.id}><div className="capture-thumbnail"><button onClick={() => void showPreview(item)} aria-label={`Previsualizar captura ${index + 1}`}><img src={item.thumbnailUrl} alt={`Fotograma ${item.timecode}`}/><span className="capture-index mono">{String(index + 1).padStart(2, '0')}</span><span className="capture-expand"><ArrowsOutSimpleIcon size={16}/></span></button><button className="delete-capture" aria-label={`Eliminar captura ${index + 1}`} disabled={!!busy} onClick={() => void removeCapture(item)}><XIcon size={14}/></button><button className="download-capture" aria-label={`Descargar captura ${index + 1}`} onClick={() => void downloadCapture(store.current, item).catch(report)}><DownloadSimpleIcon size={15}/></button></div><div className="capture-card-label"><span className="mono">{item.timecode}</span><span>{item.format === 'jpeg' ? 'JPG' : item.format.toUpperCase()}</span></div><div className="capture-card-meta"><span>{item.width} × {item.height}</span><span>{bytes(item.size)}</span></div></article>) : <div className="empty-tray"><span className="empty-tray-icon"><ImageIcon size={23}/><PlusIcon size={11}/></span><div><strong>Los buenos momentos van aquí.</strong><p>Encuentra un cuadro y pulsa <kbd>C</kbd> para guardarlo en tu bandeja.</p></div></div>}</div>
+      <section id="capture-tray" className={`staging-tray ${trayOpen ? '' : 'collapsed'}`} aria-label="Bandeja de capturas" aria-hidden={!trayVisible} inert={!trayVisible}><div className="tray-header"><button className="tray-title" aria-expanded={trayOpen} onClick={() => setTrayOpen(value => !value)}><StackSimpleIcon size={17}/><h2>Capturas</h2><span className="count-badge">{captures.length}</span>{trayOpen ? <CaretDownIcon size={14}/> : <CaretUpIcon size={14}/>}</button><span className="tray-size">{captures.length ? `${bytes(totalBytes)} · resolución original` : 'Tu selección de fotogramas'}</span><div className="tray-actions">{captures.length > 0 && <div className="tray-export-tools"><button onClick={() => void exportContactSheet()} disabled={!!busy}>Contacto</button><button onClick={() => void exportMetadata('csv')} disabled={!!busy}>CSV</button><button onClick={() => void exportMetadata('json')} disabled={!!busy}>JSON</button></div>}<button className="text-button" aria-label="Vaciar" title="Vaciar capturas" disabled={!captures.length || !!busy} onClick={() => void clearCaptures()}><TrashSimpleIcon size={14}/><span>Vaciar</span></button><button className="button zip-button" aria-label="Descargar ZIP" disabled={!captures.length || !!busy} onClick={() => void exportZip()}><DownloadSimpleIcon size={15}/><span>Descargar ZIP</span>{captures.length > 0 && <span className="zip-count">{captures.length}</span>}</button></div></div><div className={`tray-body ${captures.length ? 'populated' : ''}`} aria-hidden={!trayOpen} inert={!trayOpen}>{captures.length ? captures.map((item, index) => <article className="capture-card" key={item.id}><div className="capture-thumbnail"><button onClick={() => void showPreview(item)} aria-label={`Previsualizar captura ${index + 1}`}><img src={item.thumbnailUrl} alt={`Fotograma ${item.timecode}`}/><span className="capture-index mono">{String(index + 1).padStart(2, '0')}</span><span className="capture-expand"><ArrowsOutSimpleIcon size={16}/></span></button><button className="delete-capture" aria-label={`Eliminar captura ${index + 1}`} disabled={!!busy} onClick={() => void removeCapture(item)}><XIcon size={14}/></button><button className="download-capture" aria-label={`Descargar captura ${index + 1}`} onClick={() => void downloadCapture(store.current, item).catch(report)}><DownloadSimpleIcon size={15}/></button></div><div className="capture-card-label"><span className="mono">{item.timecode}</span><span>{item.format === 'jpeg' ? 'JPG' : item.format === 'tiff' ? 'TIFF' : item.format.toUpperCase()}</span></div><div className="capture-card-meta"><span>{item.width} × {item.height}</span><span>{bytes(item.size)}</span></div></article>) : <div className="empty-tray"><span className="empty-tray-icon"><ImageIcon size={23}/><PlusIcon size={11}/></span><div><strong>Los buenos momentos van aquí.</strong><p>Encuentra un cuadro y pulsa <kbd>C</kbd> para guardarlo en tu bandeja.</p></div></div>}</div>
       </section>
     </main>
     <footer className="status-bar"><span><span className={`status-dot ${session ? 'ready' : ''}`}/>{loading ? 'Leyendo archivo local…' : busy ? `${busy}${progress > 0 ? ` · ${Math.round(progress * 100)}%` : '…'}` : seeking ? 'Buscando fotograma…' : session ? 'Listo para capturar' : 'Esperando un video'}</span><span className="status-engine">{meta ? `${meta.engine === 'webcodecs' ? 'WebCodecs' : meta.engine === 'prores' ? 'ProRes · WASM local' : 'FFmpeg · WASM local'} · ${meta.precision === 'exact' ? 'Marcas de tiempo exactas' : 'Compatibilidad'}` : 'Hecho para mirar más de cerca.'}</span><button onClick={() => setHelp(true)}><QuestionIcon size={14}/>Atajos y ayuda</button></footer>
@@ -476,7 +552,8 @@ function App() {
     {notice && <div role={notice.error ? 'alert' : 'status'} className={`toast ${notice.error ? 'error' : ''}`}>{notice.error ? <QuestionIcon size={17}/> : <CheckIcon size={17}/>}<span>{notice.text}</span><button aria-label="Cerrar notificación" onClick={() => setNotice(null)}><XIcon size={14}/></button></div>}
     {dragging && <div className="drop-overlay"><div><FolderOpenIcon size={39}/><strong>Suelta tu video aquí</strong><span>Se abrirá directamente desde tu dispositivo.</span></div></div>}
     <AnimatedDialog open={help} onClose={() => setHelp(false)} labelledBy="help-title" className="help-dialog"><div className="dialog-heading"><div><span className="eyebrow">TU MESA DE EDICIÓN, MÁS RÁPIDA</span><h2 id="help-title">Todo, al alcance de tus teclas.</h2></div><IconButton label="Cerrar ayuda" onClick={() => setHelp(false)}><XIcon size={20}/></IconButton></div><div className="modal-scroll"><div className="shortcut-list">{shortcuts.map(([key, label]) => <div key={key}><span>{label}</span><kbd>{key}</kbd></div>)}</div><div className="help-notes"><p><strong>Precisión y color.</strong> Las flechas recorren cuadros reales por sus marcas de tiempo. El timecode usa numeración sin salto (NDF); en videos de frecuencia variable es nominal. El PNG conserva los píxeles decodificados al tamaño de salida. HDR, color de 10 bits y alfa dependen de la decodificación del navegador.</p><p><strong>Layouts.</strong> Automático adapta el espacio a la orientación del video. Vertical coloca las capturas a la derecha para ganar altura; Horizontal conserva la bandeja inferior. Visor grande comienza con los paneles ocultos. Cada layout recuerda sus tamaños y visibilidad; puedes recuperar los paneles desde la barra superior.</p><p><strong>Sesión local.</strong> Las capturas son temporales. Descárgalas antes de cerrar o recargar. La bandeja y cada ZIP admiten hasta 256 MiB. Los formatos de compatibilidad pueden decodificarse más lentamente.</p><p><strong>Sin conexión.</strong> La versión de producción guarda sus recursos en este dispositivo después de la primera carga completa. No se envía el contenido de tus videos a ningún servidor.</p></div></div></AnimatedDialog>
-    <AnimatedDialog open={previewOpen} onClose={() => setPreviewOpen(false)} onAfterClose={() => setPreview(null)} labelledBy="preview-title" className="preview-dialog">{preview && <><div className="dialog-heading"><div><h2 id="preview-title" className="mono">{preview.capture.timecode}</h2><span className="muted">{preview.capture.width} × {preview.capture.height} · {bytes(preview.capture.size)} · {preview.capture.format.toUpperCase()}</span></div><IconButton label="Cerrar previsualización" onClick={() => setPreviewOpen(false)}><XIcon size={20}/></IconButton></div><div className="modal-scroll preview-canvas"><img className="preview-image" src={preview.url} alt={`Captura completa ${preview.capture.timecode}`}/></div><div className="preview-footer"><span className="mono">{preview.capture.filename}</span><button className="button primary" onClick={() => void downloadCapture(store.current, preview.capture).catch(report)}><DownloadSimpleIcon size={16}/>Descargar</button></div></>}</AnimatedDialog>
+    <AnimatedDialog open={previewOpen} onClose={() => setPreviewOpen(false)} onAfterClose={() => setPreview(null)} labelledBy="preview-title" className="preview-dialog">{preview && <><div className="dialog-heading"><div><h2 id="preview-title" className="mono">{preview.capture.timecode}</h2><span className="muted">{preview.capture.width} × {preview.capture.height} · {bytes(preview.capture.size)} · {preview.capture.format.toUpperCase()}</span></div><IconButton label="Cerrar previsualización" onClick={() => setPreviewOpen(false)}><XIcon size={20}/></IconButton></div><div className="modal-scroll preview-canvas"><img className="preview-image" src={preview.url} alt={`Captura completa ${preview.capture.timecode}`}/></div><div className="preview-footer"><span className="mono">{preview.capture.filename}</span><div className="preview-actions"><button className="button secondary" onClick={() => void compareCapture(preview.capture)}>A/B</button><button className="button primary" onClick={() => void downloadCapture(store.current, preview.capture).catch(report)}><DownloadSimpleIcon size={16}/>Descargar</button></div></div></>}</AnimatedDialog>
+    <AnimatedDialog open={!!comparison} onClose={() => setComparison(null)} labelledBy="comparison-title" className="comparison-dialog">{comparison && <><div className="dialog-heading"><div><span className="eyebrow">COMPARACIÓN A/B</span><h2 id="comparison-title">Desliza para revelar el cambio</h2></div><IconButton label="Cerrar comparación" onClick={() => setComparison(null)}><XIcon size={20}/></IconButton></div><div className="comparison-stage"><img src={comparison.left.url} alt={`Referencia ${comparison.left.capture.timecode}`}/><img className="comparison-right" style={{ clipPath: `inset(0 0 0 ${comparisonSplit}%)` }} src={comparison.right.url} alt={`Comparación ${comparison.right.capture.timecode}`}/><div className="comparison-divider" style={{ left: `${comparisonSplit}%` }}/><input aria-label="Divisor de comparación" type="range" min="0" max="100" value={comparisonSplit} onChange={event => setComparisonSplit(Number(event.target.value))}/></div><div className="comparison-labels mono"><span>A · {comparison.left.capture.timecode}</span><span>B · {comparison.right.capture.timecode}</span></div></>}</AnimatedDialog>
   </div>;
 }
 export default App;

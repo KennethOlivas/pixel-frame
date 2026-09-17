@@ -1,0 +1,28 @@
+name: Informe de error
+description: Cuéntanos qué falló, sin adjuntar medios privados.
+title: "bug: "
+labels: [bug]
+body:
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Qué ocurrió
+      description: Describe el resultado esperado y el resultado real.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Pasos para reproducir
+      placeholder: "1. Abrí un archivo de prueba…"
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Navegador y sistema operativo
+    validations:
+      required: true
+  - type: markdown
+    attributes:
+      value: "No adjuntes videos privados ni con derechos de terceros."

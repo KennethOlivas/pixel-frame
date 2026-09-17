@@ -13,6 +13,7 @@
   <a href="https://github.com/KennethOlivas/pixel-frame/blob/main/LICENSE"><img src="https://img.shields.io/github/license/KennethOlivas/pixel-frame?color=7c3aed" alt="Licencia MIT" /></a>
   <a href="https://github.com/KennethOlivas/pixel-frame/stargazers"><img src="https://img.shields.io/github/stars/KennethOlivas/pixel-frame?style=flat&color=06b6d4" alt="Estrellas en GitHub" /></a>
   <a href="https://github.com/KennethOlivas/pixel-frame/network/members"><img src="https://img.shields.io/github/forks/KennethOlivas/pixel-frame?style=flat&color=8b5cf6" alt="Forks" /></a>
+  <a href="https://github.com/KennethOlivas/pixel-frame/releases"><img src="https://img.shields.io/github/v/release/KennethOlivas/pixel-frame?display_name=tag&color=10b981" alt="Última release" /></a>
 </p>
 
 <p align="center">
@@ -87,6 +88,10 @@ npm run build
 npm test
 ```
 
+## Versiones
+
+Las versiones siguen Semantic Versioning. Consulta [CHANGELOG.md](CHANGELOG.md) para novedades y [VERSIONING.md](VERSIONING.md) para el proceso de publicación.
+
 Abre la URL que muestra Vite. Para comprobar la versión que funciona sin conexión:
 
 ```sh
@@ -104,10 +109,11 @@ La app muestra **Disponible sin conexión** cuando el service worker termina de 
 - Timecode SMPTE sin salto de numeración (NDF), con aritmética racional para 23.976/29.97/59.94. En VFR la etiqueta es nominal; las flechas siguen los cuadros reales. Cuando no hay FPS fiables se usa tiempo en milisegundos.
 - Reproducción visual, J/K/L (reversa, pausa, avance), Espacio, flechas, Shift + flechas, Home/End, C/Enter, Ctrl/Cmd + C e I/O. Ayuda accesible con `?`.
 - Zoom del visor de 10% a 400%, botones de acercar/alejar y ajuste automático. Arrastrar recorre la imagen ampliada; Ctrl/Cmd + rueda amplía sobre el cursor. `+`/`-` ajustan el zoom y `0` o doble clic regresan al ajuste. El zoom no cambia el contenido ni las dimensiones de las capturas.
-- Exportación PNG, JPEG o WebP a dimensiones nativas de visualización, sin depender del tamaño CSS del visor. Calidad ajustable para JPEG/WebP.
+- Exportación PNG, JPEG, WebP o TIFF RGBA sin compresión a dimensiones nativas de visualización, sin depender del tamaño CSS del visor. Calidad ajustable para JPEG/WebP.
 - Capturas con miniatura, timecode, peso real, previsualización completa, descarga y eliminación. Nombres únicos, incluidos duplicados del mismo cuadro.
 - ZIP con dos workers fflate y validación de límites de memoria.
-- Extracción por intervalo en un rango I/O, o de todos los cuadros del primer segundo del rango. Operación cancelable que conserva las capturas ya terminadas.
+- Extracción por intervalo, por lista pegada de timecodes, por cambios de escena muestreados o de todos los cuadros del primer segundo del rango. Operación cancelable que conserva las capturas ya terminadas.
+- Hoja de contactos PNG y metadatos CSV/JSON con timecode, resolución, formato y tamaño; los archivos no incluyen URLs locales ni píxeles de video.
 - OPFS para originales y respaldo limitado en RAM; limpieza de sesiones abandonadas mediante Web Locks sin borrar capturas de otras pestañas activas.
 - Panel de extracción y bandeja redimensionables por arrastre o teclado, con transiciones suaves, ocultación independiente y preferencias locales. Doble clic sobre un separador restaura su tamaño.
 - Layouts Automático, Horizontal, Vertical y Visor grande. Automático usa la orientación del video; Vertical lleva la bandeja a la columna derecha en escritorio para dar más altura al visor. En móvil, el visor se adapta al ratio y a la altura disponible. La elección y los tamaños/visibilidad de paneles se recuerdan por layout; cambiar de layout conserva el fotograma y las capturas.
@@ -154,3 +160,9 @@ Los resultados y capturas de la interfaz se guardan fuera del proyecto en el dir
 Servir el contenido de `dist/` por HTTPS, con tipos MIME correctos (`.wasm` como `application/wasm`). Vite configura COOP `same-origin` y COEP `require-corp` para desarrollo y vista previa. Se incluye `public/_headers` como ejemplo compatible con servidores estáticos que interpretan ese archivo. El núcleo FFmpeg incluido usa un worker de un solo hilo y no exige SharedArrayBuffer; la compresión ZIP sí distribuye el trabajo en dos workers. Se sirven todos los recursos desde el mismo origen. No hay API, autenticación, analítica ni almacenamiento remoto de medios.
 
 Documentación de las dependencias: [Mediabunny CanvasSink](https://mediabunny.dev/api/CanvasSink), [metadatos y FPS](https://mediabunny.dev/api/InputVideoTrack), [ffmpeg.wasm](https://ffmpegwasm.netlify.app/docs/overview/). Ver [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) para licencias.
+
+### Vercel
+
+El repositorio incluye [`vercel.json`](vercel.json), con `npm run build`, salida `dist/`, cabeceras COOP/COEP necesarias para el aislamiento del navegador y una política de caché segura para el service worker. En Vercel basta importar el repositorio y conservar esos valores detectados; no se necesitan variables de entorno ni backend.
+
+Para que los videos continúen siendo locales, no añadas analítica que inspeccione archivos ni funciones de subida. La detección de escenas analiza miniaturas de luminancia en el navegador; es una ayuda para localizar cortes, no una clasificación editorial infalible.
