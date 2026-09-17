@@ -25,7 +25,7 @@ jobs:
         env:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          test "$RELEASE_TAG" = "v$(node -p \"require('./package.json').version\")"
+          node -e 'if (process.env.RELEASE_TAG !== `v${require("./package.json").version}`) process.exit(1)'
 
       - name: Install and build
         run: |
