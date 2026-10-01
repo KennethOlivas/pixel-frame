@@ -22,7 +22,7 @@
   "dependencies": {
     "@ffmpeg/core": "^0.12.10",
     "@ffmpeg/ffmpeg": "^0.12.15",
-    "@mediabunny/prores": "^1.56.2",
+    "@mediabunny/prores": "^1.60.0",
     "@phosphor-icons/react": "^2.1.10",
     "@radix-ui/react-select": "^2.3.7",
     "fflate": "^0.8.2",
